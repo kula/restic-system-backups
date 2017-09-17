@@ -1,0 +1,16 @@
+[Unit]
+Description=Backup Service Minio Master runsvdir
+
+[Service]
+ExecStart=/usr/bin/runsvdir -P /backups/systems/conf/runit/
+Restart=always
+KillMode=process
+KillSignal=SIGHUP
+SuccessExitStatus=111
+WorkingDirectory=/backups/systems
+User=backups
+Group=backups
+UMask=002
+
+[Install]
+WantedBy=multi-user.target
