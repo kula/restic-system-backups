@@ -22,9 +22,9 @@ Each 'system' directory has the following sub-directories:
 * `logs`: logs from the various services go here
 * `minio`: The root of the [minio](https://minio.io/) storage
 * `conf`: configuration:
-** `runsvs`: the [runit](http://smarden.org/runit/) `runsv` directories
+  * `runsvs`: the [runit](http://smarden.org/runit/) `runsv` directories
    for the individual services
-** `minio`: configuration for this system's minio server, contains the
+  * `minio`: configuration for this system's minio server, contains the
    `config.json` and `certs` directory for minio
 
 Currently the only service, the `minio` server, uses the following sub-
