@@ -1,0 +1,381 @@
+#!/bin/bash
+#
+# Configure the server-side components of a restic backup
+# system, outlined at:
+#  https://kula.tproa.net/lnt/computers/backups/restic-systems-backups/
+#
+# Copyright © 2017 Thomas L. Kula
+# All Rights Reserved
+#
+# See LICENSE file in the top of this repository for license information
+
+BN=`basename $0`
+
+usage() {
+    echo "$BN: create a server directory for restic backups"
+    echo "Usage: $BN [-c <cfg file> ] -h <hostname> -p <port> [-U <user>] [-G <group> ]"
+    echo ""
+    echo " -c <cfg file>"
+    echo "    Path to optional configuration file"
+    echo " -H <hostname>"
+    echo "    Hostname of system being backed up"
+    echo " -p <port>"
+    echo "    Port to run minio server on"
+    echo " -U <user>"
+    echo "    User to own directories"
+    echo " -G <group>"
+    echo "    Group to own directories"
+    echo " -h"
+    echo "    Print this help"
+    echo ""
+}
+
+# Read command line options
+while getopts ":c:H:p:hU:G:" opt; do
+    case "${opt}" in
+        c)
+            CFG_FILE="${OPTARG}"
+            ;;
+        H)  
+            HOST="${OPTARG}"
+            ;;
+        p)  
+            PORT="${OPTARG}"
+            ;;
+	U)
+	    CLI_BACKUP_USER="${OPTARG}"
+	    ;;
+	G)
+	    CLI_BACKUP_GROUP="${OPTARG}"
+	    ;;
+        h)  
+            usage
+            exit 0
+            ;;
+        \?) 
+            echo "ERROR: Invalid option -${OPTARG}" >&2
+	    echo "" >&2
+            usage >&2
+            exit 1
+            ;;
+        :)  
+            echo "ERROR: Option -${OPTARG} requires an option" >&2
+	    echo "" >&2
+            usage >&2
+            exit 1
+            ;;
+    esac
+done
+
+# Verify command line options
+if [ -z "${HOST:-}" ]; then
+    echo "ERROR: must set -H" >&2
+    echo "" >&2
+    usage >&2
+    exit 1
+fi
+
+if [ -z "${PORT:-}" ]; then
+    echo "ERROR: must set -p" >&2
+    echo "" >&2
+    usage >&2
+    exit 1
+fi
+
+# Handle config file and set defaults
+if [ -n "${CFG_FILE:-}" ]; then
+    if [ ! -f "${CFG_FILE}" ]; then
+	echo "ERROR: ${CFG_FILE} unreadable" >&2
+	echo "" >&2
+	exit 1
+    fi
+    . "${CFG_FILE}"
+fi
+
+BACKUPS_DIR="${BACKUPS_DIR:-/backups}"
+BIN_DIR="${BIN_DIR:-${BACKUPS_DIR}/bin}"
+MINIO="${MINIO:-${BIN_DIR}/minio}"
+SVLOGD="${SVLOGD:-/usr/bin/svlogd}"
+SVLOGD_OPTS="${SVLOGD_OPTS:--ttt}"
+SYSTEMS_DIR="${SYSTEMS_DIR:-${BACKUPS_DIR}/systems}"
+SYSTEMS_CONF_DIR="${SYSTEMS_CONF_DIR:-${SYSTEMS_DIR}/conf}"
+BACKUP_USER="${CLI_BACKUP_USER:-${BACKUP_USER:-backups}}"
+BACKUP_GROUP="${CLI_BACKUP_GROUP:-${BACKUP_GROUP:-backups}}"
+
+
+# Sub-tasks
+
+make_top_dir() {
+    install -d -o "${BACKUP_USER}" -g "${BACKUP_GROUP}" -m 2770 "${SYSTEMS_DIR}/${HOST}"
+    if [ $? != 0 ]; then
+	echo "Creating ${SYSTEMS_DIR}/${HOST} failed" >&2
+	exit 1
+    fi
+}
+
+make_logs_dir() {
+    for dir in logs logs/minio; do
+	install -d -o "${BACKUP_USER}" -g "${BACKUP_GROUP}" -m 2770 "${SYSTEMS_DIR}/${HOST}/${dir}"
+	if [ $? != 0 ]; then
+	    echo "Creating ${SYSTEMS_DIR}/${HOST}/${dir} failed" >&2
+	    exit 1
+	fi
+    done
+}
+
+make_conf_dir() {
+    install -d -o "${BACKUP_USER}" -g "${BACKUP_GROUP}" -m 2770 "${SYSTEMS_DIR}/${HOST}/conf"
+    if [ $? != 0 ]; then
+	echo "Creating ${SYSTEMS_DIR}/${HOST}/conf failed" >&2
+	exit 1
+    fi
+}
+
+make_minio_dir() {
+    install -d -o "${BACKUP_USER}" -g "${BACKUP_GROUP}" -m 2770 "${SYSTEMS_DIR}/${HOST}/minio"
+    if [ $? != 0 ]; then
+	echo "Creating ${SYSTEMS_DIR}/${HOST}/minio failed" >&2
+	exit 1
+    fi
+}
+
+make_runsv_setup() {
+    # We make a top-level 'runsvs' dir, which has all of our runsv-managed
+    # services, then underthat we have are individual units. The only one
+    # we currently have is a 'minio' service, but we leave the option that
+    # in the future we may want to run an indexing service, something to sync
+    # to another repo, etc, and that we'll want to have them all managed per-
+    # system being backed up.
+    #
+    # For now, we leave symlinking the runsv directory to the top-level
+    # runsvdir directory as a manual process. If we actually get around to
+    # adding those other services, we'd probably make the master runsvdir
+    # start another, per-system runsvdir that runs all the runsvs for that
+    # system.
+    #
+
+    install -d -o "${BACKUP_USER}" -g "${BACKUP_GROUP}" -m 2770 "${SYSTEMS_DIR}/${HOST}/conf/runsvs"
+    if [ $? != 0 ]; then
+	echo "Creating ${SYSTEMS_DIR}/${HOST}/conf/runsvs failed" >&2
+	exit 1
+    fi
+   
+    for runsv in minio; do
+	for dir in '' log; do
+	    install -d -o "${BACKUP_USER}" -g "${BACKUP_GROUP}" -m 2770 "${SYSTEMS_DIR}/${HOST}/conf/runsvs/${runsv}/${dir}"
+	    if [ $? != 0 ]; then
+		echo "Creating ${SYSTEMS_DIR}/${HOST}/conf/runsvs/${runsv}/${dir} failed" >&2
+		exit 1
+	    fi
+	done
+    done
+
+    # Make minio run files
+    cat <<EOF > "${SYSTEMS_DIR}/${HOST}/conf/runsvs/minio/run"
+#!/bin/bash
+# Created with $BN 
+exec ${MINIO} server --quiet --config-dir ${SYSTEMS_DIR}/${HOST}/conf/minio/ --address :${PORT} ${SYSTEMS_DIR}/${HOST}/minio 2>&1
+EOF
+
+    cat <<EOF > "${SYSTEMS_DIR}/${HOST}/conf/runsvs/minio/log/run"
+#!/bin/bash
+# Created with $BN
+exec ${SVLOGD} ${SVLOGD_OPTS} ${SYSTEMS_DIR}/${HOST}/logs/minio
+EOF
+
+    
+    chmod +x ${SYSTEMS_DIR}/${HOST}/conf/runsvs/minio/run ${SYSTEMS_DIR}/${HOST}/conf/runsvs/minio/log/run
+}
+
+make_access_key() {
+    # minio default access keys are 20 random bytes, translated
+    # in a somewhat biased way to [A-Z0-9]. See
+    # https://github.com/minio/minio/blob/b233345f1974a6969ce64dc301f4095f6a73df87/cmd/credential.go#L123
+    #
+    # We simply assign this job to pwgen and tr. Whether or not it's
+    # more or less biased I couldn't say.
+
+    pwgen 20 1 | tr '[a-z]' '[A-Z]'
+}
+
+make_secret_key() {
+    # minio default secret keys are 40 random bytes, translated to base64
+    # (which will expand the length) and then truncated to 40 random
+    # bytes. See
+    # https://github.com/minio/minio/blob/b233345f1974a6969ce64dc301f4095f6a73df87/cmd/credential.go#L123
+    #
+
+    # https://sockpuppet.org/blog/2014/02/25/safely-generate-random-numbers/
+    # "Use urandom. Use urandom. Use urandom."
+
+    key=$( dd if=/dev/urandom bs=1 count=40 2>/dev/null | base64 )
+    echo ${key:0:40}
+}
+
+make_minio_config_version_19() {
+    # Make dirs
+    install -d -o "${BACKUP_USER}" -g "${BACKUP_GROUP}" -m 2770 "${SYSTEMS_DIR}/${HOST}/conf/minio"
+    if [ $? != 0 ]; then
+	echo "Creating ${SYSTEMS_DIR}/${HOST}/conf/minio failed" >&2
+	exit 1
+    fi
+
+    # Generate access and secret keys
+    access_key=$(make_access_key)
+    secret_key=$(make_secret_key)
+
+    # Generate configuration file
+    # Minio as of version '2017-08-05T00:00:53Z' crashes
+    # if there isn't configuration for every notify method....
+
+    cat <<EOF > ${SYSTEMS_DIR}/${HOST}/conf/minio/config.json
+{
+    "version": "19",
+    "credential": {
+	"accessKey": "${access_key}",
+	"secretKey": "${secret_key}"
+    },
+    "region": "",
+    "browser": "off",
+    "logger": {
+	"console": {
+	    "enable": true
+	},
+	"file": {
+	    "enable": false
+	}
+    },
+    "notify": {
+        "amqp": {
+	    "1": {
+		"enable": false,
+		"url": "",
+		"exchange": "",
+		"routingKey": "",
+		"exchangeType": "",
+		"deliveryMode": 0,
+		"mandatory": false,
+		"immediate": false,
+		"durable": false,
+		"internal": false,
+		"noWait": false,
+		"autoDeleted": false
+	    }
+	},
+	"nats": {
+	    "1": {
+		"enable": false,
+		"address": "",
+		"subject": "",
+		"username": "",
+		"password": "",
+		"token": "",
+		"secure": false,
+		"pingInterval": 0,
+		"streaming": {
+		    "enable": false,
+		    "clusterID": "",
+		    "clientID": "",
+		    "async": false,
+		    "maxPubAcksInflight": 0
+		}
+	    }
+	},
+	"elasticsearch": {
+	    "1": {
+		"enable": false,
+		"format": "",
+		"url": "",
+		"index": ""
+	    }
+	},
+	"redis": {
+	    "1": {
+		"enable": false,
+		"format": "",
+		"address": "",
+		"password": "",
+		"key": ""
+	    }
+	},
+	"postgresql": {
+	    "1": {
+		"enable": false,
+		"format": "",
+		"connectionString": "",
+		"table": "",
+		"host": "",
+		"port": "",
+		"user": "",
+		"password": "",
+		"database": ""
+	    }
+	},
+	"kafka": {
+	    "1": {
+		"enable": false,
+		"brokers": null,
+		"topic": ""
+	    }
+	},
+	"webhook": {
+	    "1": {
+		"enable": false,
+		"endpoint": ""
+	    }
+	},
+	"mysql": {
+	    "1": {
+		"enable": false,
+		"format": "",
+		"dsnString": "",
+		"table": "",
+		"host": "",
+		"port": "",
+		"user": "",
+		"password": "",
+		"database": ""
+	    }
+	},
+	"mqtt": {
+	    "1": {
+		"enable": false,
+		"broker": "",
+		"topic": "",
+		"qos": 0,
+		"clientId": "",
+		"username": "",
+		"password": ""
+	    }
+	}
+    }
+}
+EOF
+
+    # Make certs dir and symlinks
+    install -d -o "${BACKUP_USER}" -g "${BACKUP_GROUP}" -m 2770 "${SYSTEMS_DIR}/${HOST}/conf/minio/certs"
+    if [ $? != 0 ]; then
+	echo "Creating ${SYSTEMS_DIR}/${HOST}/conf/minio/certs failed" >&2
+	exit 1
+    fi
+
+    for file in private.key public.crt; do
+	ln -s "${SYSTEMS_DIR}/conf/${file}" "${SYSTEMS_DIR}/${HOST}/conf/minio/certs/${file}"
+	if [ $? != 0 ]; then
+	    echo "Symlinking ${SYSTEMS_DIR}/${HOST}/conf/minio/certs/${file} -> " >&2
+	    echo " ${SYSTEMS_DIR}/${HOST}/conf/minio/${file} failed" >&2
+	    exit 1
+	fi
+    done
+
+
+}
+
+
+## Main
+make_top_dir
+make_logs_dir
+make_conf_dir
+make_minio_dir
+make_runsv_setup
+make_minio_config_version_19
