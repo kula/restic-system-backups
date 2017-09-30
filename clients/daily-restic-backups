@@ -1,0 +1,11 @@
+#!/bin/bash
+#
+# Perform daily restic backups, first unrolling our --files-from to get around
+# https://github.com/restic/restic/issues/549
+#
+
+EXCLUDES=`mktemp restic.excludes.XXXXXXXX`
+cat /etc/restic/exclude-files >> ${EXCLUDES}
+/usr/local/bin/restic-unroll /etc/restic/include-files >> ${EXCLUDES}
+
+/usr/local/bin/restic backup --exclude-file ${EXCLUDES} --tag -q daily / 2>&1

@@ -1,0 +1,127 @@
+#!/usr/bin/python3
+
+# 'Unroll' include lists for restic, handling 
+#  https://github.com/restic/restic/issues/549
+#
+# Part of the series of articles of using restic for system backups,
+# outlined at:
+#  https://kula.tproa.net/lnt/computers/backups/restic-systems-backups/
+#
+# Copyright © 2017 Thomas L. Kula
+# All Rights Reserved
+#
+# See LICENSE file in the top of this repository for license information
+
+
+import argparse
+from pathlib import Path
+import sys
+
+
+class ResticUnroll(object):
+    '''A helper object to unroll include lists for restic, handling
+       https://github.com/restic/restic/issues/549
+
+       Using restic to back up `/` with a list of top-level directories
+       you want to actually back up, generate a list of directories
+       suitable for `--exclude-file` so that only those directories you
+       want to back up are backed up.
+
+       E.g., if you want to back up `/etc`, `/usr/local`, `/local` and
+       `/var` this would eliminate things like `/sys`, `/proc`, `/dev`,
+       etc.
+    '''
+
+    def __init__(self, paths):
+        '''`paths` is a list of strings representing the directories
+           which should be backed up.
+        '''
+
+        self.paths = paths
+        self.paths_by_depth = dict()
+        self.excludes = set()
+        self.must_keeps = set()
+
+        self.sort_paths_by_depth()
+        self.unroll()
+
+
+    def sort_paths_by_depth(self):
+        '''`self.paths_by_depth is a dictionary whose keys are integers
+           representing how many directories deep a path goes, and whose
+           values are a list of `Path` objects which are that deep.
+           E.g.
+
+           {
+                1: [ Path('/etc'), Path('/local'), Path('/var') ],
+                2: [ Path('/usr/local') ]
+           }
+        '''
+
+        for path in self.paths:
+            p = Path(path)
+            p = p.resolve()
+            l = len(p.parts) - 1
+
+            pl =  self.paths_by_depth.get(l, list())
+            pl.append(p)
+            self.paths_by_depth[l] = pl
+
+
+    def unroll(self):
+
+        # We have to go from the deepest to the shallowest path so we
+        # can exclude the parent dir(s) of any object we do want to 
+        # back up. E.g. if we want to back up /home/malaclypse/principia
+        # we cannot blindly exclude either /home/malaclypse or /home,
+        # instead, we have to exclude *everything* *else* in those 
+        # directories which don't lead to /home/malaclypse/principia.
+
+        depths = list(self.paths_by_depth.keys())
+        depths.sort()
+        depths.reverse()
+
+        # We know we cannot exclude the things we actually want to back
+        # up, so first exclude them, and all their parent directories
+        for depth in depths:
+            for d in self.paths_by_depth[depth]:
+                self.must_keeps.add(d)
+                for parent in d.parents:
+                    self.must_keeps.add(parent)
+
+
+        # Go through every must_keeps, get sibling dirs. If those also
+        # aren't in must_keeps, add to excludes
+
+        dir_list = list(self.must_keeps)
+        dir_list.sort()
+
+        for d in dir_list:
+            for sibling in d.parent.iterdir():
+                if sibling not in self.must_keeps:
+                    self.excludes.add(sibling)
+
+
+if __name__ == '__main__':
+    parser = argparse.ArgumentParser(
+            description='Unroll include dirs to allow restic to backup / getting around '
+            'https://github.com/restic/restic/issues/549')
+    parser.add_argument('include_file',
+            type=argparse.FileType('r'),
+            help='File of directories to back up',
+            nargs='?', default=sys.stdin)
+    parser.add_argument('output_file',
+            type=argparse.FileType('w'),
+            help='Output filename',
+            nargs='?', default=sys.stdout)
+    args = parser.parse_args()
+
+    dirs = [x.strip() for x in args.include_file.readlines()]
+
+    ru = ResticUnroll(dirs)
+    dirs = list(ru.excludes)
+    dirs.sort()
+
+    for d in dirs:
+        print(d, file=args.output_file)
+
