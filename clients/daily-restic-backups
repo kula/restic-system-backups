@@ -9,3 +9,5 @@ cat /etc/restic/exclude-files >> ${EXCLUDES}
 /usr/local/bin/restic-unroll /etc/restic/include-files >> ${EXCLUDES}
 
 /usr/local/bin/restic backup --exclude-file ${EXCLUDES} --tag -q daily / 2>&1
+
+rm -f ${EXCLUDES}
