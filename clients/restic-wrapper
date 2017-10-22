@@ -1,0 +1,5 @@
+#!/bin/bash
+
+# A convenience wrapper for restic
+. /etc/restic/environ
+exec ${REAL_RESTIC:-/usr/local/bin/restic} $@

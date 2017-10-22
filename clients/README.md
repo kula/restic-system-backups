@@ -23,4 +23,7 @@ remove things to my `/etc/restic/include-files` file like I would normally and n
 Side note: there's got to be a term for what I'm trying to do with directories, and I'm sure it isn't 'unrolling',
 but that's what's stuck in my head thus far.
 
-`daily-restic-backups` is a little wrapper that demonstrates its usage, and is suitable for a daily backup cron job.
+## Miscellaneous bits
+
+* `daily-restic-backups` is a little wrapper that demonstrates its usage, and is suitable for a daily backup cron job.
+* `restic-wrapper` is a convenience wrapper that sucks in /etc/restic/environ before running restic.
