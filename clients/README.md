@@ -27,3 +27,4 @@ but that's what's stuck in my head thus far.
 
 * `daily-restic-backups` is a little wrapper that demonstrates its usage, and is suitable for a daily backup cron job.
 * `restic-wrapper` is a convenience wrapper that sucks in /etc/restic/environ before running restic.
+* `backups-cron.d` is a bit suitable for dropping into `/etc/cron.d` to do system backups.
