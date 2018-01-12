@@ -1,0 +1,241 @@
+#!/usr/bin/env python3
+
+# Watches a snapshot dir, when a new snapshot appears
+# run a sync script, if it exists
+#
+# Copyright © 2018 Thomas L. Kula
+# All Rights Reserved 
+#
+# See LICENSE file in the top of this repository for license information
+
+import argparse
+import logging
+import logging.config
+from pathlib import Path
+import signal
+import sys
+import subprocess
+import tempfile
+import time
+
+
+
+class Syncer(object):
+    def __init__(self, config):
+
+        self.config = config
+        self.start_logging()
+        self.logger.info("Starting Up")
+
+
+    def start_logging(self):
+        logdefaults = {
+                'version': 1,
+                'handlers': {
+                    'console': {
+                        'class': 'logging.StreamHandler',
+                        'stream': 'ext://sys.stdout'
+                    }
+                },
+                'root': {
+                    'handlers': ['console'],
+                    'level': 'DEBUG'
+                }
+            }
+
+        if 'logconf' in self.config:
+            logging.config.fileConfig(self.config['logconf'])
+        else:
+            logging.config.dictConfig(logdefaults)
+
+        self.logger = logging.getLogger(self.__class__.__name__)
+
+
+    def getfilelist(self):
+        '''Return a list of all *files* in the watchdir'''
+
+        filelist = []
+        try:
+            watchdir = Path(self.config['watchdir'])
+
+            for child in watchdir.iterdir():
+                if child.is_file():
+                    filelist.append(child.name)
+        except FileNotFoundError as e:
+            self.logger.critical('Watchdir {0} not found'.format(
+                self.config['watchdir']))
+            return set()
+        except PermissionError as e:
+            self.logger.critical('Watchdir {0} permissions wrong'.format(
+                self.config['watchdir']))
+            return set()
+
+        return set(filelist)
+
+
+    def dosync(self, newfiles, gonefiles):
+        '''Call config['exec'] with two arguments: the first argument
+           is the path to a temporary file with a list of the newfiles,
+           the second one contains gonefiles. These format of these
+           files are the filenames separated by null bytes. We discard
+           any output from the script; it should log on its own.
+
+           Returns True if sync was sucessful, False otherwise.'''
+
+        
+        if 'exec' not in self.config:
+            self.logger.critical('No \'exec\' defined, not syncing')
+            return False
+
+        try:
+            new_tmp = tempfile.NamedTemporaryFile()
+        except Exception as e:
+            self.logger.exception("Exception opening new_tmp: {0}".format(e))
+            return False
+
+        try:
+            gone_tmp = tempfile.NamedTemporaryFile()
+        except Exception as e:
+            self.logger.exception("Exception opening gone_tmp: {0}".format(e))
+            new_tmp.close()
+            return False
+
+        try:
+            for file in newfiles:
+                new_tmp.write(bytes(file, encoding='utf8'))
+                new_tmp.write(b'\x00')
+        except Exception as e:
+            self.logger.exception("Exception writing to new_tmp {0}: {1}".format(
+                new_tmp.name, e))
+            new_tmp.close()
+            gone_tmp.close()
+            return False
+
+        try:
+            for file in gonefiles:
+                gone_tmp.write(bytes(file, encoding='utf8'))
+                gone_tmp.write(b'\x00')
+        except Exception as e:
+            self.logger.exception("Exception writing to gone_tmp {0}: {1}".format(
+                gone_tmp.name, e))
+            new_tmp.close()
+            gone_tmp.close()
+            return False
+
+        new_tmp.file.flush()
+        gone_tmp.file.flush()
+
+        args = [self.config['exec'], new_tmp.name, gone_tmp.name]
+
+        try:
+            proc = subprocess.Popen(args = args,
+                    stdin = subprocess.DEVNULL,
+                    stdout = subprocess.DEVNULL,
+                    stderr = subprocess.DEVNULL)
+
+        except Exception as e:
+            self.logger.exception("Exception in {0}: {1!r}".format(
+                args,
+                e))
+            new_tmp.close()
+            gone_tmp.close()
+            return False
+
+        self.logger.info("Sync process {0!r} started, pid {1}".format(args, proc.pid))
+        self.logger.info("Newfiles {0}".format(newfiles))
+        self.logger.info("Gonefiles {0}".format(gonefiles))
+
+
+        rc = proc.wait()
+        
+        # Process has ended, log exit code
+        if proc.returncode < 0:
+            # Got a signal
+            sig = abs(proc.returncode)
+            self.logger.error("Sync process {0} exited by signal {1}".format(
+                proc.pid,
+                signal.Signals(sig).name))
+            new_tmp.close()
+            gone_tmp.close()
+            return False
+        elif proc.returncode == 0:
+            # Exited cleanly
+            self.logger.info("Sync process {0} exited with 0".format(
+                proc.pid))
+            new_tmp.close()
+            gone_tmp.close()
+            return True
+        else:
+            # Exited with return code
+            self.logger.error("Sync process {0} exited with {1}".format(
+                proc.pid,
+                proc.returncode))
+            new_tmp.close()
+            gone_tmp.close()
+            return False
+        
+
+    def run(self):
+
+        self.logger.debug('Do initial sleep here')
+        time.sleep(self.config['startupdelay'])
+
+        self._filelist = self.getfilelist()
+
+        while True:
+            self.logger.debug('Top of True loop')
+            newfilelist = self.getfilelist()
+
+            newfiles = newfilelist - self._filelist
+            gonefiles = self._filelist - newfilelist
+
+            dosync = False
+
+            if len(newfiles) != 0:
+                dosync = True
+                self.logger.debug('New snapshots: {0}'.format(newfiles))
+
+            if len(gonefiles) != 0:
+                dosync = True
+                self.logger.debug('Files went away: {0}'.format(gonefiles))
+
+            if dosync:
+                if self.dosync(newfiles, gonefiles):
+                    self._filelist = newfilelist
+
+            time.sleep(self.config['loopdelay'])
+
+
+if __name__ == '__main__':
+    parser = argparse.ArgumentParser(
+            description='Watch a watchdir and run a replica script when files change')
+    parser.add_argument('--watchdir',
+            required=True,
+            help="Directory to watch")
+    parser.add_argument('--script',
+            dest='exec',
+            required=True,
+            help="Script to run")
+    parser.add_argument('--startupdelay',
+            type=int,
+            default=1,
+            help="Sleep this many seconds when started")
+    parser.add_argument('--loopdelay',
+            type=int,
+            default=60,
+            help="Sleep this many seconds between passes")
+    parser.add_argument('--execpolldelay',
+            type=int,
+            default=1,
+            help="Sleep this many seconds between checking on script")
+    parser.add_argument('--logconf',
+            help="Path to Python logconfig file")
+
+    args = parser.parse_args()
+    config=vars(args)
+
+    s = Syncer(config)
+    s.run()
+
+
+# vim: set filetype=python :
