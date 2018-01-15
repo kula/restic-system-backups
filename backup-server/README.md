@@ -13,10 +13,10 @@ A different directory layout is possible, but you will likely have to modify
 scripts to match.
 
 Each system being backed up has a collection of services which are responsible
-for handling that system's backups. Currently there's only one service, the
-minio server that stores the restic backup objects, but we leave open the
-potential for future services like indexers, syncing to another restic
-repository, etc.
+for handling that system's backups. Currently there are two services: the
+minio server that stores the restic backup objects, and `backup-syncd`, which
+watches for new snapshots and runs a script to sychronize files to other
+storage backends.
 
 Each 'system' directory has the following sub-directories:
 * `logs`: logs from the various services go here
@@ -26,12 +26,15 @@ Each 'system' directory has the following sub-directories:
    for the individual services
   * `minio`: configuration for this system's minio server, contains the
    `config.json` and `certs` directory for minio
+  * `runsvdir`: a runsv formated service directory, which runs runsvdir
+   to run everything under `runsvs`
+  * `replica_sync`: a script called by `backup-syncd` when new snapshots
+   are detected
+  * `backup-syncd.log.conf`: a Python logging configuration file, defaults
+   to something which logs to stdout, to work with svlogd in the runit
+   suite
 
-Currently the only service, the `minio` server, uses the following sub-
-directories:
-* `logs/minio`: its logs
-* `runsvs/minio`: the `runsv` directory which keeps minio running and
-                  handles its logs
+In general, everything logs under `logs`, using `svlogd`. 
 
 ## Files
 * `backup-minio.service`: a systemd service unit file for the `runsvdir`
@@ -61,7 +64,8 @@ The creation of this certificate is beyond the scope of this document.
   server being backed up and you must configure any firewalls to allow
   traffic from the client to reach this port on the server.
 * `new-restic-server -H aserver.example.com -p <portno>`
-* `ln -s /backups/systems/aserver.example.com/conf/runsvs/minio /backups/systems/conf/runit/aserver.example.com-minio`
+* Edit `/backups/systems/aserver.examnple.com/conf/replica_sync` as necessary
+* `ln -s /backups/systems/aserver.example.com/conf/runsvdir /backups/systems/conf/runit/aserver.example.com`
 
 On the client server you can now back up to this newly running minio server
 on the port selected above, using the credentials in
