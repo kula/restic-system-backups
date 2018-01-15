@@ -4,12 +4,13 @@
 # system, outlined at:
 #  https://kula.tproa.net/lnt/computers/backups/restic-systems-backups/
 #
-# Copyright © 2017 Thomas L. Kula
+# Copyright © 2017, 2018 Thomas L. Kula
 # All Rights Reserved
 #
 # See LICENSE file in the top of this repository for license information
 
 BN=`basename $0`
+VER=2
 
 usage() {
     echo "$BN: create a server directory for restic backups"
@@ -95,6 +96,7 @@ fi
 BACKUPS_DIR="${BACKUPS_DIR:-/backups}"
 BIN_DIR="${BIN_DIR:-${BACKUPS_DIR}/bin}"
 MINIO="${MINIO:-${BIN_DIR}/minio}"
+BACKUP_SYNCD="${BACKUP_SYNCD:-${BIN_DIR}/backup-syncd}"
 SVLOGD="${SVLOGD:-/usr/bin/svlogd}"
 SVLOGD_OPTS="${SVLOGD_OPTS:--ttt}"
 SYSTEMS_DIR="${SYSTEMS_DIR:-${BACKUPS_DIR}/systems}"
@@ -114,7 +116,7 @@ make_top_dir() {
 }
 
 make_logs_dir() {
-    for dir in logs logs/minio; do
+    for dir in logs logs/minio logs/backup-syncd logs/runsvdir logs/replica_sync; do
 	install -d -o "${BACKUP_USER}" -g "${BACKUP_GROUP}" -m 2770 "${SYSTEMS_DIR}/${HOST}/${dir}"
 	if [ $? != 0 ]; then
 	    echo "Creating ${SYSTEMS_DIR}/${HOST}/${dir} failed" >&2
@@ -139,28 +141,54 @@ make_minio_dir() {
     fi
 }
 
+make_backup_syncd_setup() {
+    # 1. Drop in an empty 'replica_sync' script
+    # 2. symlink backup-syncd.log.conf to system conf template
+
+    cat <<EOF > ${SYSTEMS_DIR}/${HOST}/conf/replica_sync
+#!/bin/bash
+# Created by $BN version $VER
+# Override this to do whatever sync you want to do when this system
+# creates a snapshot
+exit 0
+EOF
+
+    chmod 550 ${SYSTEMS_DIR}/${HOST}/conf/replica_sync
+    chown ${BACKUP_USER}:${BACKUP_GROUP} ${SYSTEMS_DIR}/${HOST}/conf/replica_sync
+
+    ln -s ${SYSTEMS_DIR}/conf/backup-syncd.log.conf ${SYSTEMS_DIR}/${HOST}/conf/backup-syncd.log.conf
+
+}
+
 make_runsv_setup() {
     # We make a top-level 'runsvs' dir, which has all of our runsv-managed
-    # services, then underthat we have are individual units. The only one
-    # we currently have is a 'minio' service, but we leave the option that
-    # in the future we may want to run an indexing service, something to sync
-    # to another repo, etc, and that we'll want to have them all managed per-
-    # system being backed up.
+    # services, then under that we have individual units. Current units
+    # are 'minio', to run the minio storage engine for this system; and
+    # 'backup-syncd', to sync backups to replica storage.
     #
-    # For now, we leave symlinking the runsv directory to the top-level
-    # runsvdir directory as a manual process. If we actually get around to
-    # adding those other services, we'd probably make the master runsvdir
-    # start another, per-system runsvdir that runs all the runsvs for that
-    # system.
+    # These 'runsv' units are managed by a top-level 'runsvdir', which 
+    # has its own runsv unit in the 'runsvdir' right inside the conf
+    # directory, which is ran by the top-level runsv called from the
+    # systemd unit.
     #
-
+    # In brief:
+    #
+    #  - systemd runs runsvdir /backups/systems/conf/runit/
+    #  - in there are symlinks to /backups/systems/aserver.example.com/conf/runsvdir
+    #  - which runs runsvdir /backups/systems/aserver.example.com/conf/runsvs
+    #  - which runs everything necessary to backup aserver.
+    #
+    # Making the symlink to .../aserver.example.com/conf/runsvs is manual,
+    # and allows you to easily turn on and turn off the services to run
+    # aserver.
+    local services='minio backup-syncd'
     install -d -o "${BACKUP_USER}" -g "${BACKUP_GROUP}" -m 2770 "${SYSTEMS_DIR}/${HOST}/conf/runsvs"
     if [ $? != 0 ]; then
 	echo "Creating ${SYSTEMS_DIR}/${HOST}/conf/runsvs failed" >&2
 	exit 1
     fi
    
-    for runsv in minio; do
+    for runsv in $services; do
 	for dir in '' log; do
 	    install -d -o "${BACKUP_USER}" -g "${BACKUP_GROUP}" -m 2770 "${SYSTEMS_DIR}/${HOST}/conf/runsvs/${runsv}/${dir}"
 	    if [ $? != 0 ]; then
@@ -173,18 +201,56 @@ make_runsv_setup() {
     # Make minio run files
     cat <<EOF > "${SYSTEMS_DIR}/${HOST}/conf/runsvs/minio/run"
 #!/bin/bash
-# Created with $BN 
+# Created with $BN version $VER
 exec ${MINIO} server --quiet --config-dir ${SYSTEMS_DIR}/${HOST}/conf/minio/ --address :${PORT} ${SYSTEMS_DIR}/${HOST}/minio 2>&1
 EOF
 
     cat <<EOF > "${SYSTEMS_DIR}/${HOST}/conf/runsvs/minio/log/run"
 #!/bin/bash
-# Created with $BN
+# Created with $BN version $VER
 exec ${SVLOGD} ${SVLOGD_OPTS} ${SYSTEMS_DIR}/${HOST}/logs/minio
 EOF
 
-    
-    chmod +x ${SYSTEMS_DIR}/${HOST}/conf/runsvs/minio/run ${SYSTEMS_DIR}/${HOST}/conf/runsvs/minio/log/run
+    # Make backup-syncd files
+    cat <<EOF > "${SYSTEMS_DIR}/${HOST}/conf/runsvs/backup-syncd/run"
+#!/bin/bash
+# Created with $BN version $VER
+exec ${BACKUP_SYNCD} --watchdir=${SYSTEMS_DIR}/${HOST}/minio/backups/restic/snapshots --script=${SYSTEMS_DIR}/${HOST}/conf/replica_sync --logconf ${SYSTEMS_DIR}/${HOST}/conf/backup-syncd.log.conf 2>&1
+EOF
+
+    cat <<EOF > "${SYSTEMS_DIR}/${HOST}/conf/runsvs/backup-syncd/log/run"
+#!/bin/bash
+# Created with $BN version $VER
+exec ${SVLOGD} ${SVLOGD_OPTS} ${SYSTEMS_DIR}/${HOST}/logs/backup-syncd
+EOF
+
+    for runsv in $services; do
+	chmod +x ${SYSTEMS_DIR}/${HOST}/conf/runsvs/${runsv}/run ${SYSTEMS_DIR}/${HOST}/conf/runsvs/${runsv}/log/run
+    done
+
+    # Make runsvdir top-level manager
+    for dir in '' log; do
+	install -d -o "${BACKUP_USER}" -g "${BACKUP_GROUP}" -m 2770 "${SYSTEMS_DIR}/${HOST}/conf/runsvdir/${dir}"
+	if [ $? != 0 ]; then
+	    echo "Creating ${SYSTEMS_DIR}/${HOST}/conf/runsvdir/${dir} failed" >&2
+	    exit 1
+	fi
+    done
+
+    cat <<EOF > ${SYSTEMS_DIR}/${HOST}/conf/runsvdir/run
+#!/bin/bash
+# Created with $BN version $VER
+exec /usr/bin/runsvdir -P ${SYSTEMS_DIR}/${HOST}/conf/runsvs 2>&1
+EOF
+
+    cat <<EOF > ${SYSTEMS_DIR}/${HOST}/conf/runsvdir/log/run
+#!/bin/bash
+# Created with $BN version $VER
+exec ${SVLOGD} ${SVLOGD_OPTS} ${SYSTEMS_DIR}/${HOST}/logs/runsvdir
+EOF
+
+    chmod +x ${SYSTEMS_DIR}/${HOST}/conf/runsvdir/run ${SYSTEMS_DIR}/${HOST}/conf/runsvdir/log/run
+
 }
 
 make_access_key() {
@@ -377,5 +443,6 @@ make_top_dir
 make_logs_dir
 make_conf_dir
 make_minio_dir
+make_backup_syncd_setup
 make_runsv_setup
 make_minio_config_version_19
